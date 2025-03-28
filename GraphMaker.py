@@ -89,9 +89,6 @@ def process_and_visualize(csv_path, output_dir):
         if price is not None:
             stock_prices[symbol] = price
 
-    # Debug: Print stock prices found
-    print("Stock prices fetched online:", stock_prices)
-
     # Add Underlying Last to options_df based on fetched prices
     underlying_price_col = 'Underlying Last'
     options_df[underlying_price_col] = options_df['Underlying Symbol'].map(stock_prices)
@@ -99,38 +96,24 @@ def process_and_visualize(csv_path, output_dir):
     # Debug: Print options_df with Underlying Last
     print(f"options_df with {underlying_price_col}:\n{options_df[['Underlying Symbol', underlying_price_col]].dropna()}")
 
-    # Organize by expiration and symbol
+    # --- Original Visualization (by expiration) ---
     grouped = options_df.groupby(['Expiration', 'Underlying Symbol'])
-
-    # Visualization with lines and spread shading
     for (expiration, symbol), group in grouped:
-        # Debug: Print Underlying Last values for this group
-        print(f"\nGroup for {symbol} (Expiration: {expiration}):")
-        print(f"Underlying price values:\n{group[underlying_price_col].dropna()}")
-        if group[underlying_price_col].isna().all():
-            print(f"Warning: All {underlying_price_col} values for {symbol} (Expiration: {expiration}) are NaN.")
-
-        # --- FIGURE SIZE AND FONT SETTINGS ---
-        plt.figure(figsize=(12, 8))  # Increased height for vertical price axis
+        plt.figure(figsize=(12, 8))
         title = f"Options for {symbol} - Expiration: {expiration}"
-        plt.title(title, fontsize=16)  # Increased title font size
+        plt.title(title, fontsize=16)
 
-        # Determine price range for the y-axis
         min_price = min(group['Strike Price'].min(), group[underlying_price_col].min() if not group[underlying_price_col].isna().all() else float('inf')) - 10
         max_price = max(group['Strike Price'].max(), group[underlying_price_col].max() if not group[underlying_price_col].isna().all() else float('-inf')) + 10
         if min_price == float('inf') or max_price == float('-inf'):
-            min_price, max_price = 0, 100  # Default range if no valid prices
+            min_price, max_price = 0, 100
 
-        # Calculate single breakeven for the symbol
         breakeven = calculate_symbol_breakeven(group)
         if pd.notna(breakeven):
             min_price = min(min_price, breakeven - 10)
             max_price = max(max_price, breakeven + 10)
 
-        # Track used legs to prevent reuse
         used_symbols = set()
-
-        # Check for spreads based on strike order, position, and same account
         if len(group) > 1 and group['Quantity'].min() < 0 and group['Quantity'].max() > 0:
             for option_type in ['C', 'P']:
                 long_options = group[(group['Quantity'] > 0) & (group['Call/Put'] == option_type)].sort_values('Strike Price')
@@ -142,7 +125,6 @@ def process_and_visualize(csv_path, output_dir):
                     for _, short_row in short_options.iterrows():
                         if short_row['Symbol'] in used_symbols:
                             continue
-                        # Check if both legs are in the same account
                         if long_row['Account'] != short_row['Account']:
                             continue
                         
@@ -150,7 +132,6 @@ def process_and_visualize(csv_path, output_dir):
                         high_strike = max(long_row['Strike Price'], short_row['Strike Price'])
                         
                         if option_type == 'C':
-                            # Call Spreads
                             if long_row['Strike Price'] < short_row['Strike Price']:
                                 spread_type = "Debit Call"
                                 color = 'green'
@@ -160,7 +141,6 @@ def process_and_visualize(csv_path, output_dir):
                             else:
                                 continue
                         elif option_type == 'P':
-                            # Put Spreads
                             if long_row['Strike Price'] > short_row['Strike Price']:
                                 spread_type = "Debit Put"
                                 color = 'green'
@@ -171,61 +151,93 @@ def process_and_visualize(csv_path, output_dir):
                                 continue
                         
                         label = f"{spread_type} Spread: {long_row['Symbol']} & {short_row['Symbol']} (Account: {long_row['Account']})"
-                        # Shade horizontally between strikes on y-axis (price)
                         plt.fill_betweenx([low_strike, high_strike], 0, 1, color=color, alpha=0.3, label=label)
-                        
                         used_symbols.add(long_row['Symbol'])
                         used_symbols.add(short_row['Symbol'])
                         break
 
-        # Plot horizontal lines for each option strike (x-axis)
         for i, (_, row) in enumerate(group.iterrows()):
             strike = row['Strike Price']
             is_short = row['Quantity'] < 0
             option_type = row['Call/Put']
             label = f"{row['Symbol']} ({'Short' if is_short else 'Long'} {option_type})"
-
-            linestyle = '--' if is_short else '-'  # Dotted for short, solid for long
+            linestyle = '--' if is_short else '-'
             plt.hlines(y=strike, xmin=0, xmax=1, color='black', linestyle=linestyle, linewidth=2.5, label=label)
-            
-            # --- P AND C LABEL SIZE ---
-            # Edit fontsize here to change "P" and "C" size (was 10, now 14)
             plt.text(0.95, strike, option_type, fontsize=14, color='black', ha='right', va='center')
 
-        # --- CURRENT PRICE LINE ---
-        # Add blue horizontal line for current price (edit color or linestyle here)
         current_price = group[underlying_price_col].dropna().iloc[0] if not group[underlying_price_col].isna().all() else None
         if current_price is not None:
             plt.hlines(y=current_price, xmin=0, xmax=1, color='blue', linestyle='-', label=f'Underlying Last: {current_price:.2f}')
-        else:
-            print(f"No valid Underlying Last price found for {symbol} (Expiration: {expiration}).")
 
-        # --- BREAKEVEN PRICE LINE ---
-        # Add purple solid line for symbol breakeven (edit color or linestyle here)
         if pd.notna(breakeven):
             plt.hlines(y=breakeven, xmin=0, xmax=1, color='purple', linestyle='-', linewidth=2, label=f"Breakeven {symbol}: {breakeven:.2f}")
 
-        # --- AXIS LABEL FONT SIZE ---
-        # Edit fontsize here to adjust x and y label sizes (was 12, now 14)
-        plt.xlabel('Option Strikes', fontsize=14)  # Now x-axis is strikes
-        plt.ylabel('Underlying Price', fontsize=14)  # Now y-axis is price
-        plt.xlim(0, 1)  # Fixed x-axis for clarity (strikes as relative positions)
-        plt.xticks([])  # Remove x-axis ticks since it's just a placeholder
+        plt.xlabel('Option Strikes', fontsize=14)
+        plt.ylabel('Underlying Price', fontsize=14)
+        plt.xlim(0, 1)
+        plt.xticks([])
         plt.ylim(min_price, max_price)
-
-        # --- LEGEND (KEY) SETTINGS ---
-        # Edit loc, bbox_to_anchor, or fontsize here to adjust key position and size (below graph)
         plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), title="Key", fontsize=10, title_fontsize=12, frameon=True, ncol=2)
-
         plt.grid(True, linestyle='--', alpha=0.7)
 
-        # Save the plot to the specified directory
         filename = output_path / f"{symbol}_{expiration.replace('/', '-')}_options.png"
-        plt.savefig(filename, bbox_inches='tight')  # Ensure legend fits below
+        plt.savefig(filename, bbox_inches='tight')
         print(f"Saved plot: {filename}")
         plt.close()
 
-    # Summary table with breakeven calculated per group
+    # --- New Visualization (by account and symbol, all expirations) ---
+    by_account_path = output_path / "by_account"
+    by_account_path.mkdir(parents=True, exist_ok=True)
+    print(f"Account-separated graphs will be saved to: {by_account_path.resolve()}")
+
+    grouped_by_account = options_df.groupby(['Account', 'Underlying Symbol'])
+    for (account, symbol), group in grouped_by_account:
+        plt.figure(figsize=(12, 8))
+        title = f"Options for {symbol} - Account: {account} (All Expirations)"
+        plt.title(title, fontsize=16)
+
+        min_price = group['Strike Price'].min() - 10
+        max_price = group['Strike Price'].max() + 10
+        current_price = group[underlying_price_col].dropna().iloc[0] if not group[underlying_price_col].isna().all() else None
+        if current_price is not None:
+            min_price = min(min_price, current_price - 10)
+            max_price = max(max_price, current_price + 10)
+
+        breakeven = calculate_symbol_breakeven(group)
+        if pd.notna(breakeven):
+            min_price = min(min_price, breakeven - 10)
+            max_price = max(max_price, breakeven + 10)
+
+        for i, (_, row) in enumerate(group.iterrows()):
+            strike = row['Strike Price']
+            is_short = row['Quantity'] < 0
+            option_type = row['Call/Put']
+            expiration = row['Expiration']
+            label = f"{row['Symbol']} ({'Short' if is_short else 'Long'} {option_type}, Exp: {expiration})"
+            linestyle = '--' if is_short else '-'
+            plt.hlines(y=strike, xmin=0, xmax=1, color='black', linestyle=linestyle, linewidth=2.5, label=label)
+            plt.text(0.95, strike, option_type, fontsize=14, color='black', ha='right', va='center')
+
+        if current_price is not None:
+            plt.hlines(y=current_price, xmin=0, xmax=1, color='blue', linestyle='-', label=f'Underlying Last: {current_price:.2f}')
+
+        if pd.notna(breakeven):
+            plt.hlines(y=breakeven, xmin=0, xmax=1, color='purple', linestyle='-', linewidth=2, label=f"Breakeven {symbol}: {breakeven:.2f}")
+
+        plt.xlabel('Option Strikes', fontsize=14)
+        plt.ylabel('Underlying Price', fontsize=14)
+        plt.xlim(0, 1)
+        plt.xticks([])
+        plt.ylim(min_price, max_price)
+        plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), title="Key", fontsize=10, title_fontsize=12, frameon=True, ncol=2)
+        plt.grid(True, linestyle='--', alpha=0.7)
+
+        filename = by_account_path / f"{symbol}_{account}_options.png"
+        plt.savefig(filename, bbox_inches='tight')
+        print(f"Saved account plot: {filename}")
+        plt.close()
+
+    # Summary table (original)
     summary_data = []
     for (expiration, symbol), group in grouped:
         breakeven = calculate_symbol_breakeven(group)
@@ -240,30 +252,26 @@ def process_and_visualize(csv_path, output_dir):
         summary_data.append(summary_row)
     
     summary = pd.DataFrame(summary_data)
-    print("\nSummary of Options:")
+    print("\nSummary of Options (by Expiration):")
     print(summary.to_string(index=False))
 
     # Instructions
     print("\nInstructions:")
-    print(f"1. Graphs are saved as PNG files in the directory: {output_path.resolve()}")
-    print("2. Black lines: Solid = long calls/puts, Dotted = short calls/puts (horizontal at strikes).")
-    print("3. 'C' or 'P' next to each line indicates call or put.")
-    print("4. Green shading: Debit spread (Calls: Long low, Short high; Puts: Long high, Short low, same account).")
-    print("5. Red shading: Credit spread (Calls: Short low, Long high; Puts: Short high, Long low, same account).")
-    print("6. Blue line: Underlying Last (current price of the stock, horizontal).")
-    print("7. Purple solid line: Combined breakeven price for all options of the symbol.")
-    print("8. Key is below the graph; check the summary table for an overview.")
+    print(f"1. Expiration-based graphs are saved in: {output_path.resolve()}")
+    print(f"2. Account-separated graphs (all expirations) are saved in: {by_account_path.resolve()}")
+    print("3. Black lines: Solid = long calls/puts, Dotted = short calls/puts (horizontal at strikes).")
+    print("4. 'C' or 'P' next to each line indicates call or put.")
+    print("5. Green shading (expiration graphs only): Debit spread.")
+    print("6. Red shading (expiration graphs only): Credit spread.")
+    print("7. Blue line: Underlying Last (current price of the stock).")
+    print("8. Purple solid line: Combined breakeven price for all options of the symbol.")
+    print("9. Key is below each graph; check the summary table for an overview.")
 
 def main():
-    # Set up argument parser
     parser = argparse.ArgumentParser(description="Visualize options strikes from a CSV file.")
     parser.add_argument('csv_path', type=str, help="Path to the CSV file containing options data")
     parser.add_argument('--output_dir', type=str, default='output', help="Directory where graphs will be saved (default: 'output')")
-
-    # Parse arguments
     args = parser.parse_args()
-
-    # Call the processing function with the provided CSV path and output directory
     process_and_visualize(args.csv_path, args.output_dir)
 
 if __name__ == "__main__":
