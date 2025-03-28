@@ -160,10 +160,14 @@ def process_and_visualize(csv_path, output_dir):
             strike = row['Strike Price']
             is_short = row['Quantity'] < 0
             option_type = row['Call/Put']
+            quantity = abs(row['Quantity'])  # Absolute value, sign indicated by linestyle
+            expiration_date = row['Expiration']
             label = f"{row['Symbol']} ({'Short' if is_short else 'Long'} {option_type})"
             linestyle = '--' if is_short else '-'
             plt.hlines(y=strike, xmin=0, xmax=1, color='black', linestyle=linestyle, linewidth=2.5, label=label)
-            plt.text(0.95, strike, option_type, fontsize=14, color='black', ha='right', va='center')
+            # Updated text to include strike, quantity, and expiration
+            plt.text(0.95, strike, f"{option_type},{quantity},{strike},{expiration_date}", 
+                     fontsize=12, color='black', ha='right', va='center')
 
         current_price = group[underlying_price_col].dropna().iloc[0] if not group[underlying_price_col].isna().all() else None
         if current_price is not None:
@@ -185,7 +189,7 @@ def process_and_visualize(csv_path, output_dir):
         print(f"Saved plot: {filename}")
         plt.close()
 
-    # --- New Visualization (by account and symbol, all expirations) ---
+    # --- New Visualization (by account and symbol, all expirations) with shading ---
     by_account_path = output_path / "by_account"
     by_account_path.mkdir(parents=True, exist_ok=True)
     print(f"Account-separated graphs will be saved to: {by_account_path.resolve()}")
@@ -208,15 +212,61 @@ def process_and_visualize(csv_path, output_dir):
             min_price = min(min_price, breakeven - 10)
             max_price = max(max_price, breakeven + 10)
 
+        # --- Spread Detection and Shading ---
+        used_symbols = set()
+        if len(group) > 1 and group['Quantity'].min() < 0 and group['Quantity'].max() > 0:
+            for option_type in ['C', 'P']:
+                long_options = group[(group['Quantity'] > 0) & (group['Call/Put'] == option_type)].sort_values('Strike Price')
+                short_options = group[(group['Quantity'] < 0) & (group['Call/Put'] == option_type)].sort_values('Strike Price')
+                
+                for _, long_row in long_options.iterrows():
+                    if long_row['Symbol'] in used_symbols:
+                        continue
+                    for _, short_row in short_options.iterrows():
+                        if short_row['Symbol'] in used_symbols:
+                            continue
+                        
+                        low_strike = min(long_row['Strike Price'], short_row['Strike Price'])
+                        high_strike = max(long_row['Strike Price'], short_row['Strike Price'])
+                        
+                        if option_type == 'C':
+                            if long_row['Strike Price'] < short_row['Strike Price']:
+                                spread_type = "Debit Call"
+                                color = 'green'
+                            elif long_row['Strike Price'] > short_row['Strike Price']:
+                                spread_type = "Credit Call"
+                                color = 'red'
+                            else:
+                                continue
+                        elif option_type == 'P':
+                            if long_row['Strike Price'] > short_row['Strike Price']:
+                                spread_type = "Debit Put"
+                                color = 'green'
+                            elif long_row['Strike Price'] < short_row['Strike Price']:
+                                spread_type = "Credit Put"
+                                color = 'red'
+                            else:
+                                continue
+                        
+                        label = f"{spread_type} Spread: {long_row['Symbol']} & {short_row['Symbol']}"
+                        plt.fill_betweenx([low_strike, high_strike], 0, 1, color=color, alpha=0.3, label=label)
+                        used_symbols.add(long_row['Symbol'])
+                        used_symbols.add(short_row['Symbol'])
+                        break
+
+        # --- Plot Strikes with Updated Labels ---
         for i, (_, row) in enumerate(group.iterrows()):
             strike = row['Strike Price']
             is_short = row['Quantity'] < 0
             option_type = row['Call/Put']
-            expiration = row['Expiration']
-            label = f"{row['Symbol']} ({'Short' if is_short else 'Long'} {option_type}, Exp: {expiration})"
+            quantity = abs(row['Quantity'])  # Absolute value, sign indicated by linestyle
+            expiration_date = row['Expiration']
+            label = f"{row['Symbol']} ({'Short' if is_short else 'Long'} {option_type}, Exp: {expiration_date})"
             linestyle = '--' if is_short else '-'
             plt.hlines(y=strike, xmin=0, xmax=1, color='black', linestyle=linestyle, linewidth=2.5, label=label)
-            plt.text(0.95, strike, option_type, fontsize=14, color='black', ha='right', va='center')
+            # Updated text to include strike, quantity, and expiration
+            plt.text(0.95, strike, f"{option_type},{quantity},{strike},{expiration_date}", 
+                     fontsize=12, color='black', ha='right', va='center')
 
         if current_price is not None:
             plt.hlines(y=current_price, xmin=0, xmax=1, color='blue', linestyle='-', label=f'Underlying Last: {current_price:.2f}')
@@ -260,9 +310,9 @@ def process_and_visualize(csv_path, output_dir):
     print(f"1. Expiration-based graphs are saved in: {output_path.resolve()}")
     print(f"2. Account-separated graphs (all expirations) are saved in: {by_account_path.resolve()}")
     print("3. Black lines: Solid = long calls/puts, Dotted = short calls/puts (horizontal at strikes).")
-    print("4. 'C' or 'P' next to each line indicates call or put.")
-    print("5. Green shading (expiration graphs only): Debit spread.")
-    print("6. Red shading (expiration graphs only): Credit spread.")
+    print("4. Text next to lines: 'C/P,Quantity,Strike,Expiration' (e.g., 'C,1,150,3/24/2025').")
+    print("5. Green shading: Debit spread (Calls: Long low, Short high; Puts: Long high, Short low).")
+    print("6. Red shading: Credit spread (Calls: Short low, Long high; Puts: Short high, Long low).")
     print("7. Blue line: Underlying Last (current price of the stock).")
     print("8. Purple solid line: Combined breakeven price for all options of the symbol.")
     print("9. Key is below each graph; check the summary table for an overview.")
