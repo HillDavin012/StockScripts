@@ -4,6 +4,7 @@ import seaborn as sns
 from pathlib import Path
 import argparse
 import yfinance as yf
+from datetime import datetime
 
 # Set seaborn style for better visuals
 sns.set(style="whitegrid")
@@ -82,6 +83,9 @@ def process_and_visualize(csv_path, output_dir):
         else:
             print(f"Warning: Column '{col}' not found in the data.")
 
+    # Convert Expiration to datetime for sorting
+    options_df['Expiration_dt'] = pd.to_datetime(options_df['Expiration'], errors='coerce')
+
     # Fetch current prices for all unique underlying symbols
     stock_prices = {}
     for symbol in options_df['Underlying Symbol'].unique():
@@ -114,6 +118,8 @@ def process_and_visualize(csv_path, output_dir):
             max_price = max(max_price, breakeven + 10)
 
         used_symbols = set()
+        has_debit_spread = False
+        has_credit_spread = False
         if len(group) > 1 and group['Quantity'].min() < 0 and group['Quantity'].max() > 0:
             for option_type in ['C', 'P']:
                 long_options = group[(group['Quantity'] > 0) & (group['Call/Put'] == option_type)].sort_values('Strike Price')
@@ -135,53 +141,69 @@ def process_and_visualize(csv_path, output_dir):
                             if long_row['Strike Price'] < short_row['Strike Price']:
                                 spread_type = "Debit Call"
                                 color = 'green'
+                                has_debit_spread = True
                             elif long_row['Strike Price'] > short_row['Strike Price']:
                                 spread_type = "Credit Call"
                                 color = 'red'
+                                has_credit_spread = True
                             else:
                                 continue
                         elif option_type == 'P':
                             if long_row['Strike Price'] > short_row['Strike Price']:
                                 spread_type = "Debit Put"
                                 color = 'green'
+                                has_debit_spread = True
                             elif long_row['Strike Price'] < short_row['Strike Price']:
                                 spread_type = "Credit Put"
                                 color = 'red'
+                                has_credit_spread = True
                             else:
                                 continue
                         
-                        label = f"{spread_type} Spread: {long_row['Symbol']} & {short_row['Symbol']} (Account: {long_row['Account']})"
-                        plt.fill_betweenx([low_strike, high_strike], 0, 1, color=color, alpha=0.3, label=label)
+                        plt.fill_betweenx([low_strike, high_strike], 0, 1, color=color, alpha=0.3)
                         used_symbols.add(long_row['Symbol'])
                         used_symbols.add(short_row['Symbol'])
                         break
 
-        for i, (_, row) in enumerate(group.iterrows()):
-            strike = row['Strike Price']
-            is_short = row['Quantity'] < 0
-            option_type = row['Call/Put']
-            quantity = abs(row['Quantity'])  # Absolute value, sign indicated by linestyle
-            expiration_date = row['Expiration']
-            label = f"{row['Symbol']} ({'Short' if is_short else 'Long'} {option_type})"
-            linestyle = '--' if is_short else '-'
-            plt.hlines(y=strike, xmin=0, xmax=1, color='black', linestyle=linestyle, linewidth=2.5, label=label)
-            # Updated text to include strike, quantity, and expiration
-            plt.text(0.95, strike, f"{option_type},{quantity},{strike},{expiration_date}", 
-                     fontsize=12, color='black', ha='right', va='center')
+        # Group by strike price for text placement
+        strike_groups = group.groupby('Strike Price')
+        for strike, strike_group in strike_groups:
+            linestyle = '--' if strike_group['Quantity'].iloc[0] < 0 else '-'
+            plt.hlines(y=strike, xmin=0, xmax=1, color='black', linestyle=linestyle, linewidth=2.5)
+            # Sort by expiration date (earliest first)
+            sorted_group = strike_group.sort_values('Expiration_dt')
+            x_pos = 0.05  # Start from left
+            for _, row in sorted_group.iterrows():
+                option_type = row['Call/Put']
+                quantity = abs(row['Quantity'])
+                expiration_date = row['Expiration']
+                text = f"{option_type},{quantity},{round(strike)},{expiration_date}"
+                plt.text(x_pos, strike + 0.5, text, fontsize=12, color='black', ha='left', va='bottom')
+                # Estimate text width (approx. 0.015 per character) and add padding
+                text_width = len(text) * 0.015 + 0.02
+                x_pos += text_width  # Move right for next label
 
+        # Custom legend
         current_price = group[underlying_price_col].dropna().iloc[0] if not group[underlying_price_col].isna().all() else None
+        legend_elements = [
+            plt.Line2D([0], [0], color='black', lw=2.5, linestyle='-', label='Long Option'),
+            plt.Line2D([0], [0], color='black', lw=2.5, linestyle='--', label='Short Option')
+        ]
+        if has_debit_spread:
+            legend_elements.append(plt.Line2D([0], [0], color='green', lw=10, alpha=0.3, label='Debit Spread'))
+        if has_credit_spread:
+            legend_elements.append(plt.Line2D([0], [0], color='red', lw=10, alpha=0.3, label='Credit Spread'))
         if current_price is not None:
-            plt.hlines(y=current_price, xmin=0, xmax=1, color='blue', linestyle='-', label=f'Underlying Last: {current_price:.2f}')
-
+            legend_elements.append(plt.Line2D([0], [0], color='blue', lw=2, label=f'Underlying Last: {current_price:.2f}'))
         if pd.notna(breakeven):
-            plt.hlines(y=breakeven, xmin=0, xmax=1, color='purple', linestyle='-', linewidth=2, label=f"Breakeven {symbol}: {breakeven:.2f}")
+            legend_elements.append(plt.Line2D([0], [0], color='purple', lw=2, label=f'Breakeven {symbol}: {breakeven:.2f}'))
 
         plt.xlabel('Option Strikes', fontsize=14)
         plt.ylabel('Underlying Price', fontsize=14)
         plt.xlim(0, 1)
         plt.xticks([])
         plt.ylim(min_price, max_price)
-        plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), title="Key", fontsize=10, title_fontsize=12, frameon=True, ncol=2)
+        plt.legend(handles=legend_elements, loc='upper center', bbox_to_anchor=(0.5, -0.15), title="Key", fontsize=10, title_fontsize=12, frameon=True, ncol=2)
         plt.grid(True, linestyle='--', alpha=0.7)
 
         filename = output_path / f"{symbol}_{expiration.replace('/', '-')}_options.png"
@@ -214,6 +236,8 @@ def process_and_visualize(csv_path, output_dir):
 
         # --- Spread Detection and Shading ---
         used_symbols = set()
+        has_debit_spread = False
+        has_credit_spread = False
         if len(group) > 1 and group['Quantity'].min() < 0 and group['Quantity'].max() > 0:
             for option_type in ['C', 'P']:
                 long_options = group[(group['Quantity'] > 0) & (group['Call/Put'] == option_type)].sort_values('Strike Price')
@@ -233,53 +257,68 @@ def process_and_visualize(csv_path, output_dir):
                             if long_row['Strike Price'] < short_row['Strike Price']:
                                 spread_type = "Debit Call"
                                 color = 'green'
+                                has_debit_spread = True
                             elif long_row['Strike Price'] > short_row['Strike Price']:
                                 spread_type = "Credit Call"
                                 color = 'red'
+                                has_credit_spread = True
                             else:
                                 continue
                         elif option_type == 'P':
                             if long_row['Strike Price'] > short_row['Strike Price']:
                                 spread_type = "Debit Put"
                                 color = 'green'
+                                has_debit_spread = True
                             elif long_row['Strike Price'] < short_row['Strike Price']:
                                 spread_type = "Credit Put"
                                 color = 'red'
+                                has_credit_spread = True
                             else:
                                 continue
                         
-                        label = f"{spread_type} Spread: {long_row['Symbol']} & {short_row['Symbol']}"
-                        plt.fill_betweenx([low_strike, high_strike], 0, 1, color=color, alpha=0.3, label=label)
+                        plt.fill_betweenx([low_strike, high_strike], 0, 1, color=color, alpha=0.3)
                         used_symbols.add(long_row['Symbol'])
                         used_symbols.add(short_row['Symbol'])
                         break
 
-        # --- Plot Strikes with Updated Labels ---
-        for i, (_, row) in enumerate(group.iterrows()):
-            strike = row['Strike Price']
-            is_short = row['Quantity'] < 0
-            option_type = row['Call/Put']
-            quantity = abs(row['Quantity'])  # Absolute value, sign indicated by linestyle
-            expiration_date = row['Expiration']
-            label = f"{row['Symbol']} ({'Short' if is_short else 'Long'} {option_type}, Exp: {expiration_date})"
-            linestyle = '--' if is_short else '-'
-            plt.hlines(y=strike, xmin=0, xmax=1, color='black', linestyle=linestyle, linewidth=2.5, label=label)
-            # Updated text to include strike, quantity, and expiration
-            plt.text(0.95, strike, f"{option_type},{quantity},{strike},{expiration_date}", 
-                     fontsize=12, color='black', ha='right', va='center')
+        # Group by strike price for text placement
+        strike_groups = group.groupby('Strike Price')
+        for strike, strike_group in strike_groups:
+            linestyle = '--' if strike_group['Quantity'].iloc[0] < 0 else '-'
+            plt.hlines(y=strike, xmin=0, xmax=1, color='black', linestyle=linestyle, linewidth=2.5)
+            # Sort by expiration date (earliest first)
+            sorted_group = strike_group.sort_values('Expiration_dt')
+            x_pos = 0.05  # Start from left
+            for _, row in sorted_group.iterrows():
+                option_type = row['Call/Put']
+                quantity = abs(row['Quantity'])
+                expiration_date = row['Expiration']
+                text = f"{option_type},{quantity},{round(strike)},{expiration_date}"
+                plt.text(x_pos, strike + 0.5, text, fontsize=12, color='black', ha='left', va='bottom')
+                # Estimate text width (approx. 0.015 per character) and add padding
+                text_width = len(text) * 0.015 + 0.02
+                x_pos += text_width  # Move right for next label
 
+        # Custom legend
+        legend_elements = [
+            plt.Line2D([0], [0], color='black', lw=2.5, linestyle='-', label='Long Option'),
+            plt.Line2D([0], [0], color='black', lw=2.5, linestyle='--', label='Short Option')
+        ]
+        if has_debit_spread:
+            legend_elements.append(plt.Line2D([0], [0], color='green', lw=10, alpha=0.3, label='Debit Spread'))
+        if has_credit_spread:
+            legend_elements.append(plt.Line2D([0], [0], color='red', lw=10, alpha=0.3, label='Credit Spread'))
         if current_price is not None:
-            plt.hlines(y=current_price, xmin=0, xmax=1, color='blue', linestyle='-', label=f'Underlying Last: {current_price:.2f}')
-
+            legend_elements.append(plt.Line2D([0], [0], color='blue', lw=2, label=f'Underlying Last: {current_price:.2f}'))
         if pd.notna(breakeven):
-            plt.hlines(y=breakeven, xmin=0, xmax=1, color='purple', linestyle='-', linewidth=2, label=f"Breakeven {symbol}: {breakeven:.2f}")
+            legend_elements.append(plt.Line2D([0], [0], color='purple', lw=2, label=f'Breakeven {symbol}: {breakeven:.2f}'))
 
         plt.xlabel('Option Strikes', fontsize=14)
         plt.ylabel('Underlying Price', fontsize=14)
         plt.xlim(0, 1)
         plt.xticks([])
         plt.ylim(min_price, max_price)
-        plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), title="Key", fontsize=10, title_fontsize=12, frameon=True, ncol=2)
+        plt.legend(handles=legend_elements, loc='upper center', bbox_to_anchor=(0.5, -0.15), title="Key", fontsize=10, title_fontsize=12, frameon=True, ncol=2)
         plt.grid(True, linestyle='--', alpha=0.7)
 
         filename = by_account_path / f"{symbol}_{account}_options.png"
@@ -310,12 +349,13 @@ def process_and_visualize(csv_path, output_dir):
     print(f"1. Expiration-based graphs are saved in: {output_path.resolve()}")
     print(f"2. Account-separated graphs (all expirations) are saved in: {by_account_path.resolve()}")
     print("3. Black lines: Solid = long calls/puts, Dotted = short calls/puts (horizontal at strikes).")
-    print("4. Text next to lines: 'C/P,Quantity,Strike,Expiration' (e.g., 'C,1,150,3/24/2025').")
+    print("4. Text next to lines: 'C/P,Quantity,Strike,Expiration' (e.g., 'C,1,150,3/24/2025'), offset above the line, strike rounded.")
+    print("   - If multiple options share a strike, text is offset left-to-right, sorted by expiration (earliest first).")
     print("5. Green shading: Debit spread (Calls: Long low, Short high; Puts: Long high, Short low).")
     print("6. Red shading: Credit spread (Calls: Short low, Long high; Puts: Short high, Long low).")
     print("7. Blue line: Underlying Last (current price of the stock).")
     print("8. Purple solid line: Combined breakeven price for all options of the symbol.")
-    print("9. Key is below each graph; check the summary table for an overview.")
+    print("9. Key is below each graph; simplified to show line styles and spread types only.")
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize options strikes from a CSV file.")
